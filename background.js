@@ -180,13 +180,14 @@ async function handleMessage(msg) {
     }
 
     case 'UPDATE_URL_SETTINGS': {
-      const { normalizedUrl, limitSeconds, notifyBeforeSeconds, autoClose, note } = msg;
+      const { normalizedUrl, limitSeconds, notifyBeforeSeconds, autoClose, note, pinned } = msg;
       const map = await getTrackedUrls();
       if (map[normalizedUrl]) {
         map[normalizedUrl].limitSeconds = limitSeconds;
         map[normalizedUrl].notifyBeforeSeconds = notifyBeforeSeconds;
         map[normalizedUrl].autoClose = autoClose;
         map[normalizedUrl].note = (note || '').trim().slice(0, 120);
+        map[normalizedUrl].pinned = pinned || false;
         await saveTrackedUrls(map);
       }
       return { ok: true };

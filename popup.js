@@ -1,201 +1,204 @@
-// popup.js — UI controller
-// Communicates with background service worker via chrome.runtime.sendMessage
+// popup.js — Two-tab UI: drag-reorder (handle-only), pin, copy, notes
 
-let state = {}; // { [normalizedUrl]: { originalUrl, todayS, weekS, monthS, allTimeS, limitS, isLive, notifyBeforeS, autoClose } }
+let state     = {};
+let urlOrder  = [];
 let refreshTimer = null;
 
-// ─── Init ──────────────────────────────────────────────────────────────────────
+// ─── Init ────────────────────────────────────────────────────────────────────────
 
-document.addEventListener('DOMContentLoaded', () => {
-  loadState();
+document.addEventListener('DOMContentLoaded', async () => {
+  await loadOrder();
+  await loadState();
   bindUI();
-  // Refresh every 3s for live second-level counters
+  bindTabs();
   refreshTimer = setInterval(loadState, 3000);
+  showExtId();
+  showStorageUsed();
 });
 
-window.addEventListener('unload', () => {
-  clearInterval(refreshTimer);
-});
+window.addEventListener('unload', () => clearInterval(refreshTimer));
 
-// ─── Data Loading ──────────────────────────────────────────────────────────────
+// ─── Order storage ───────────────────────────────────────────────────────────────
+
+async function loadOrder() {
+  return new Promise(resolve => {
+    chrome.storage.local.get('urlOrder', d => { urlOrder = d.urlOrder || []; resolve(); });
+  });
+}
+async function saveOrder() {
+  return new Promise(resolve => chrome.storage.local.set({ urlOrder }, resolve));
+}
+
+function getOrderedUrls() {
+  const keys = Object.keys(state);
+  for (const k of keys) if (!urlOrder.includes(k)) urlOrder.push(k);
+  urlOrder = urlOrder.filter(k => keys.includes(k));
+  const pinned   = urlOrder.filter(k => state[k]?.pinned);
+  const unpinned = urlOrder.filter(k => !state[k]?.pinned);
+  return [...pinned, ...unpinned];
+}
+
+// ─── Load state ──────────────────────────────────────────────────────────────────
 
 async function loadState() {
   try {
     const resp = await sendMsg({ type: 'GET_STATE' });
     state = resp.trackedUrls || {};
-    // Don't re-render while user is typing — it kills focus
     const active = document.activeElement;
-    const userTyping = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
-    if (!userTyping) renderAll();
-  } catch (e) {
-    console.error('[Popup] loadState error:', e);
-  }
+    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+    renderAll();
+  } catch(e) { console.error(e); }
 }
 
-// ─── Render ────────────────────────────────────────────────────────────────────
+// ─── Tabs ────────────────────────────────────────────────────────────────────────
+
+function bindTabs() {
+  document.querySelectorAll('.tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
+      btn.classList.add('active');
+      const id = 'panel' + btn.dataset.tab[0].toUpperCase() + btn.dataset.tab.slice(1);
+      document.getElementById(id)?.classList.remove('hidden');
+    });
+  });
+}
+
+// ─── Render ──────────────────────────────────────────────────────────────────────
 
 function renderAll() {
-  const list = document.getElementById('urlList');
-  const empty = document.getElementById('emptyState');
+  const list       = document.getElementById('urlList');
+  const empty      = document.getElementById('emptyState');
   const summaryBar = document.getElementById('summaryBar');
-  const totalMonthEl = document.getElementById('totalMonth');
-  const activeCountEl = document.getElementById('activeCount');
-  const sectionLabel = document.getElementById('sectionLabel');
+  const totalEl    = document.getElementById('totalMonth');
+  const activeEl   = document.getElementById('activeCount');
+  const secLabel   = document.getElementById('sectionLabel');
 
-  const entries = Object.entries(state);
+  const ordered = getOrderedUrls();
 
-  if (entries.length === 0) {
+  if (ordered.length === 0) {
     empty.style.display = 'block';
     summaryBar.style.display = 'none';
-    sectionLabel.style.display = 'none';
-    // Clear cards (keep empty state)
-    Array.from(list.children).forEach(c => {
-      if (c.id !== 'emptyState') c.remove();
-    });
-    activeCountEl.textContent = '0 active';
+    secLabel.style.display = 'none';
+    list.innerHTML = '';
+    list.appendChild(empty);
+    activeEl.textContent = '0 active';
     return;
   }
 
   empty.style.display = 'none';
   summaryBar.style.display = 'flex';
-  sectionLabel.style.display = 'block';
+  secLabel.style.display   = 'block';
 
-  // Calc totals
-  let totalMonth = 0;
-  let activeCount = 0;
-  for (const [, d] of entries) {
+  let totalMonth = 0, activeCount = 0;
+  for (const d of Object.values(state)) {
     totalMonth += d.monthSeconds || 0;
     if (d.isLive) activeCount++;
   }
+  totalEl.textContent    = formatTime(totalMonth);
+  activeEl.textContent   = activeCount + ' active';
 
-  totalMonthEl.textContent = formatTime(totalMonth);
-  activeCountEl.textContent = `${activeCount} active`;
+  // Build new list, reuse existing card elements when possible
+  const newList = document.createDocumentFragment();
+  newList.appendChild(empty);
 
-  // Render / update each card
-  for (const [nUrl, data] of entries) {
-    const cardId = 'card-' + btoa(nUrl).replace(/[^a-z0-9]/gi, '');
+  for (const nUrl of ordered) {
+    const data = state[nUrl]; if (!data) continue;
+    const cardId = 'card-' + CSS.escape(btoa(unescape(encodeURIComponent(nUrl))).slice(0, 20));
     let card = document.getElementById(cardId);
+    const settingsOpen = card?.querySelector('.card-settings')?.classList.contains('open');
     if (!card) {
-      card = buildCard(nUrl, data, cardId);
-      // Insert before empty state
-      list.insertBefore(card, empty);
-    } else {
-      updateCard(card, nUrl, data);
+      card = document.createElement('div');
+      card.className = 'url-card';
+      card.id = cardId;
     }
+    card.dataset.nurl = nUrl;
+    card.innerHTML = cardHTML(nUrl, data);
+    if (settingsOpen) card.querySelector('.card-settings')?.classList.add('open');
+    bindCardEvents(card, nUrl);
+    setupDrag(card, nUrl);
+    newList.appendChild(card);
   }
 
-  // Remove cards for removed URLs
-  Array.from(list.querySelectorAll('.url-card')).forEach(card => {
-    const nUrl = card.dataset.nurl;
-    if (nUrl && !state[nUrl]) card.remove();
-  });
+  list.innerHTML = '';
+  list.appendChild(newList);
 }
 
-function buildCard(nUrl, data, cardId) {
-  const div = document.createElement('div');
-  div.className = 'url-card';
-  div.id = cardId;
-  div.dataset.nurl = nUrl;
-  div.innerHTML = cardHTML(nUrl, data);
-  bindCardEvents(div, nUrl);
-  return div;
-}
-
-function updateCard(card, nUrl, data) {
-  // Only update dynamic content to avoid full re-render (preserves settings panel state)
-  const isSettingsOpen = card.querySelector('.card-settings')?.classList.contains('open');
-  card.innerHTML = cardHTML(nUrl, data);
-  if (isSettingsOpen) {
-    card.querySelector('.card-settings')?.classList.add('open');
-  }
-  bindCardEvents(card, nUrl);
-}
+// ─── Card HTML ───────────────────────────────────────────────────────────────────
 
 function cardHTML(nUrl, data) {
-  const url = data.originalUrl || nUrl;
-  const displayUrl = url.length > 58 ? url.slice(0, 55) + '…' : url;
-  const note = data.note || '';
+  const url    = data.originalUrl || nUrl;
+  const disp   = url.length > 56 ? url.slice(0, 53) + '…' : url;
+  const note   = (data.note || '').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  const pinned = !!data.pinned;
 
-  const isLive = data.isLive;
-  const badgeHtml = isLive
+  const badge = data.isLive
     ? `<span class="badge badge-live">● LIVE</span>`
     : `<span class="badge badge-closed">CLOSED</span>`;
 
   const monthS = data.monthSeconds || 0;
   const limitS = data.limitSeconds;
-  let progressHtml = '';
-
+  let prog = '';
   if (limitS) {
     const pct = Math.min(100, Math.round((monthS / limitS) * 100));
-    const remaining = Math.max(0, limitS - monthS);
-    const fillClass = pct >= 95 ? 'danger' : pct >= 80 ? 'warn' : '';
-    progressHtml = `
-      <div class="progress-wrap">
-        <div class="progress-header">
-          <span class="progress-label">Month: ${formatTime(monthS)} / ${formatTime(limitS)}</span>
-          <span class="progress-pct">${pct}%</span>
-        </div>
-        <div class="progress-bar"><div class="progress-fill ${fillClass}" style="width:${pct}%"></div></div>
-        ${pct >= 80 ? `<div class="progress-remaining ${pct >= 100 ? 'danger' : ''}">
-          ${pct >= 100 ? '🚫 Limit reached' : `⚠ ${formatTime(remaining)} remaining`}
-        </div>` : ''}
-      </div>`;
+    const rem = Math.max(0, limitS - monthS);
+    const fc  = pct >= 95 ? 'danger' : pct >= 80 ? 'warn' : '';
+    prog = `<div class="progress-wrap">
+      <div class="progress-header">
+        <span class="progress-label">Month: ${formatTime(monthS)} / ${formatTime(limitS)}</span>
+        <span class="progress-pct">${pct}%</span>
+      </div>
+      <div class="progress-bar"><div class="progress-fill ${fc}" style="width:${pct}%"></div></div>
+      ${pct >= 80 ? `<div class="progress-remaining ${pct>=100?'danger':''}">
+        ${pct >= 100 ? '🚫 Limit reached' : `⚠ ${formatTime(rem)} remaining`}
+      </div>` : ''}
+    </div>`;
   } else {
-    progressHtml = `
-      <div class="progress-wrap">
-        <div class="progress-header">
-          <span class="progress-label">Month: ${formatTime(monthS)} / ∞</span>
-        </div>
-      </div>`;
+    prog = `<div class="progress-wrap"><div class="progress-header">
+      <span class="progress-label">Month: ${formatTime(monthS)} / ∞</span>
+    </div></div>`;
   }
 
-  const notifyHrs = data.notifyBeforeSeconds ? (data.notifyBeforeSeconds / 3600).toFixed(1) : '2.0';
-  const limitHrsCur = limitS ? Math.floor(limitS / 3600) : '';
-  const limitMinsCur = limitS ? Math.floor((limitS % 3600) / 60) : '';
-  const noteEsc = note.replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  const notifyHrs   = data.notifyBeforeSeconds ? (data.notifyBeforeSeconds/3600).toFixed(1) : '2.0';
+  const limitHrsCur = limitS ? Math.floor(limitS/3600)      : '';
+  const limitMinCur = limitS ? Math.floor((limitS%3600)/60) : '';
+  const rawNote     = (data.note||'').replace(/</g,'&lt;').replace(/"/g,'&quot;');
 
   return `
     <div class="card-top">
+      <div class="drag-handle" data-draghandle title="Drag to reorder">⠿</div>
       <div class="card-url-block">
-        ${note ? `<span class="card-note">${note.replace(/</g,'&lt;')}</span>` : ''}
-        <span class="card-url" title="${url}">${displayUrl}</span>
+        ${data.note ? `<span class="card-note">${data.note.replace(/</g,'&lt;')}</span>` : ''}
+        <span class="card-url" title="${url}">${disp}</span>
       </div>
-      <div class="card-badges">${badgeHtml}</div>
+      <div class="card-badges">
+        ${pinned ? `<span class="badge badge-pinned">📌</span>` : ''}
+        ${badge}
+      </div>
     </div>
-    ${progressHtml}
+    ${prog}
     <div class="stats-grid">
-      <div class="stat-cell">
-        <span class="stat-label">Today</span>
-        <span class="stat-val">${formatTime(data.todaySeconds || 0)}</span>
-      </div>
-      <div class="stat-cell">
-        <span class="stat-label">Week</span>
-        <span class="stat-val">${formatTime(data.weekSeconds || 0)}</span>
-      </div>
-      <div class="stat-cell">
-        <span class="stat-label">Month</span>
-        <span class="stat-val">${formatTime(data.monthSeconds || 0)}</span>
-      </div>
-      <div class="stat-cell">
-        <span class="stat-label">All-time</span>
-        <span class="stat-val">${formatTime(data.allTimeSeconds || 0)}</span>
-      </div>
+      <div class="stat-cell"><span class="stat-label">Today</span><span class="stat-val">${formatTime(data.todaySeconds||0)}</span></div>
+      <div class="stat-cell"><span class="stat-label">Week</span><span class="stat-val">${formatTime(data.weekSeconds||0)}</span></div>
+      <div class="stat-cell"><span class="stat-label">Month</span><span class="stat-val">${formatTime(data.monthSeconds||0)}</span></div>
+      <div class="stat-cell"><span class="stat-label">All-time</span><span class="stat-val">${formatTime(data.allTimeSeconds||0)}</span></div>
     </div>
     <div class="card-footer">
-      <button class="btn-copy-url" data-action="copyUrl" title="Copy URL">⎘ Copy</button>
-      <button class="btn-settings-card" data-action="settings">⚙ Settings</button>
-      <button class="btn-icon-remove" data-action="remove">✕ Remove</button>
+      <button class="fc-btn btn-pin"  data-action="pin">${pinned ? '📌 Pinned' : '📍 Pin'}</button>
+      <button class="fc-btn btn-copy" data-action="copyUrl">⎘ Copy</button>
+      <button class="fc-btn btn-cfg"  data-action="settings">⚙ Settings</button>
+      <button class="fc-btn btn-del"  data-action="remove">✕</button>
     </div>
     <div class="card-settings" data-settings>
       <div class="settings-row">
         <span class="settings-label">Name / Note:</span>
-        <input class="settings-input settings-input-wide" data-field="note" type="text" maxlength="120" value="${noteEsc}" placeholder="e.g. My Codespace session A">
+        <input class="settings-input settings-input-wide" data-field="note" type="text" maxlength="120" value="${rawNote}" placeholder="e.g. My Codespace session A">
       </div>
       <div class="settings-row">
         <span class="settings-label">Monthly limit:</span>
-        <input class="settings-input" data-field="limitHrs" type="number" min="0" step="0.5" value="${limitHrsCur}" placeholder="hrs">
+        <input class="settings-input" data-field="limitHrs"  type="number" min="0" step="0.5" value="${limitHrsCur}" placeholder="hrs">
         <span class="label-small">h</span>
-        <input class="settings-input" data-field="limitMins" type="number" min="0" max="59" value="${limitMinsCur}" placeholder="m">
+        <input class="settings-input" data-field="limitMins" type="number" min="0" max="59" value="${limitMinCur}" placeholder="m">
         <span class="label-small">m</span>
       </div>
       <div class="settings-row">
@@ -205,7 +208,7 @@ function cardHTML(nUrl, data) {
       </div>
       <div class="settings-row">
         <label class="check-wrap">
-          <input type="checkbox" data-field="autoClose" ${data.autoClose ? 'checked' : ''}>
+          <input type="checkbox" data-field="autoClose" ${data.autoClose?'checked':''}>
           <span class="check-label">Auto-close tab on limit</span>
         </label>
         <button class="btn-save-settings" data-action="saveSettings">Save</button>
@@ -217,185 +220,229 @@ function cardHTML(nUrl, data) {
         <button class="btn-reset" data-action="resetWeek">Week</button>
         <button class="btn-reset" data-action="resetMonth">Month</button>
         <button class="btn-reset" data-action="resetAllTime">All-time</button>
-        <button class="btn-reset btn-reset-all" data-action="resetAll">All</button>
+        <button class="btn-reset btn-reset-all" data-action="resetAll">ALL</button>
       </div>
-    </div>
-  `;
+    </div>`;
 }
 
+// ─── Card events ─────────────────────────────────────────────────────────────────
+
 function bindCardEvents(card, nUrl) {
+  card.querySelector('[data-action="pin"]')?.addEventListener('click', async () => {
+    const cur = !!state[nUrl]?.pinned;
+    await sendMsg({
+      type: 'UPDATE_URL_SETTINGS', normalizedUrl: nUrl,
+      limitSeconds:        state[nUrl]?.limitSeconds        ?? null,
+      notifyBeforeSeconds: state[nUrl]?.notifyBeforeSeconds ?? 7200,
+      autoClose:           state[nUrl]?.autoClose           ?? false,
+      note:                state[nUrl]?.note                ?? '',
+      pinned:              !cur
+    });
+    showToast(!cur ? '📌 Pinned to top' : 'Unpinned');
+    await loadState();
+  });
+
   card.querySelector('[data-action="copyUrl"]')?.addEventListener('click', async () => {
-    const url = state[nUrl]?.originalUrl || nUrl;
-    await navigator.clipboard.writeText(url);
+    await navigator.clipboard.writeText(state[nUrl]?.originalUrl || nUrl);
     showToast('URL copied!');
   });
 
   card.querySelector('[data-action="remove"]')?.addEventListener('click', async () => {
-    if (confirm('Remove tracking for this URL?')) {
-      await sendMsg({ type: 'REMOVE_URL', normalizedUrl: nUrl });
-      await loadState();
-    }
+    if (!confirm('Remove tracking for this URL?')) return;
+    await sendMsg({ type: 'REMOVE_URL', normalizedUrl: nUrl });
+    urlOrder = urlOrder.filter(u => u !== nUrl);
+    await saveOrder();
+    await loadState();
   });
 
-  card.querySelector('[data-action="settings"]')?.addEventListener('click', (e) => {
-    const panel = card.querySelector('[data-settings]');
-    panel?.classList.toggle('open');
+  card.querySelector('[data-action="settings"]')?.addEventListener('click', e => {
+    card.querySelector('[data-settings]')?.classList.toggle('open');
     e.stopPropagation();
+  });
+
+  card.querySelector('[data-action="saveSettings"]')?.addEventListener('click', async () => {
+    const lh = parseFloat(card.querySelector('[data-field="limitHrs"]')?.value)  || 0;
+    const lm = parseFloat(card.querySelector('[data-field="limitMins"]')?.value) || 0;
+    const nh = parseFloat(card.querySelector('[data-field="notifyHrs"]')?.value) || 2;
+    const ac = card.querySelector('[data-field="autoClose"]')?.checked || false;
+    const nt = card.querySelector('[data-field="note"]')?.value || '';
+    await sendMsg({
+      type: 'UPDATE_URL_SETTINGS', normalizedUrl: nUrl,
+      limitSeconds:        (lh>0||lm>0) ? Math.round(lh*3600+lm*60) : null,
+      notifyBeforeSeconds: Math.round(nh*3600),
+      autoClose: ac, note: nt,
+      pinned: state[nUrl]?.pinned || false
+    });
+    showToast('Settings saved');
+    await loadState();
   });
 
   const resetMap = { resetToday:'today', resetWeek:'week', resetMonth:'month', resetAllTime:'alltime', resetAll:'all' };
   for (const [action, scope] of Object.entries(resetMap)) {
     card.querySelector(`[data-action="${action}"]`)?.addEventListener('click', async () => {
-      const label = scope === 'all' ? 'ALL stats' : `${scope} stats`;
-      if (!confirm(`Reset ${label} for this URL? Cannot be undone.`)) return;
+      if (!confirm(`Reset ${scope==='all'?'ALL stats':scope+' stats'}? Cannot be undone.`)) return;
       await sendMsg({ type: 'RESET_STATS', normalizedUrl: nUrl, scope });
-      showToast(`${scope === 'all' ? 'All stats' : scope.charAt(0).toUpperCase() + scope.slice(1)} reset`);
+      showToast(scope==='all' ? 'All stats reset' : scope+' reset');
       await loadState();
     });
   }
+}
 
-  card.querySelector('[data-action="saveSettings"]')?.addEventListener('click', async () => {
-    const limitHrs = parseFloat(card.querySelector('[data-field="limitHrs"]')?.value) || 0;
-    const limitMins = parseFloat(card.querySelector('[data-field="limitMins"]')?.value) || 0;
-    const notifyHrs = parseFloat(card.querySelector('[data-field="notifyHrs"]')?.value) || 2;
-    const autoClose = card.querySelector('[data-field="autoClose"]')?.checked || false;
+// ─── Drag & Drop (pointer-events based, works on Linux Chrome) ──────────────────
+// We only allow drag when mousedown is on the handle, by toggling card.draggable.
 
-    const limitSeconds = limitHrs > 0 || limitMins > 0
-      ? Math.round((limitHrs * 3600) + (limitMins * 60))
-      : null;
-    const notifyBeforeSeconds = Math.round(notifyHrs * 3600);
+function setupDrag(card, nUrl) {
+  const handle = card.querySelector('[data-draghandle]');
+  if (!handle) return;
 
-    const note = card.querySelector('[data-field="note"]')?.value || '';
+  let dragging = false;
+  let overUrl  = null;
 
-    await sendMsg({
-      type: 'UPDATE_URL_SETTINGS',
-      normalizedUrl: nUrl,
-      limitSeconds,
-      notifyBeforeSeconds,
-      autoClose,
-      note
-    });
-    showToast('Settings saved');
-    await loadState();
+  // Only enable draggable when pressing the handle
+  handle.addEventListener('mousedown', () => { card.draggable = true; });
+  document.addEventListener('mouseup', () => { card.draggable = false; }, { passive: true });
+
+  card.addEventListener('dragstart', e => {
+    if (!card.draggable) { e.preventDefault(); return; }
+    dragging = true;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', nUrl);
+    // Defer class add so Chrome renders the ghost first
+    setTimeout(() => card.classList.add('dragging'), 0);
+  });
+
+  card.addEventListener('dragend', () => {
+    dragging = false;
+    card.draggable = false;
+    card.classList.remove('dragging');
+    document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+  });
+
+  card.addEventListener('dragover', e => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const src = e.dataTransfer.getData('text/plain') || null;
+    if (nUrl !== src) {
+      document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+      card.classList.add('drag-over');
+      overUrl = nUrl;
+    }
+  });
+
+  card.addEventListener('dragleave', e => {
+    // Only remove if leaving to outside the card
+    if (!card.contains(e.relatedTarget)) {
+      card.classList.remove('drag-over');
+    }
+  });
+
+  card.addEventListener('drop', async e => {
+    e.preventDefault();
+    card.classList.remove('drag-over');
+    const srcUrl = e.dataTransfer.getData('text/plain');
+    if (!srcUrl || srcUrl === nUrl) return;
+
+    const from = urlOrder.indexOf(srcUrl);
+    const to   = urlOrder.indexOf(nUrl);
+    if (from === -1 || to === -1) return;
+
+    urlOrder.splice(from, 1);
+    urlOrder.splice(to, 0, srcUrl);
+    await saveOrder();
+    renderAll();
+    showToast('Order saved');
   });
 }
 
-// ─── Add URL ──────────────────────────────────────────────────────────────────
+// ─── Add URL / UI ────────────────────────────────────────────────────────────────
 
 function bindUI() {
-  // Current tab button
   document.getElementById('currentTabBtn').addEventListener('click', async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.url || (!tab.url.startsWith('http://') && !tab.url.startsWith('https://'))) {
-      showToast('No valid URL on current tab');
-      return;
-    }
+    if (!tab?.url || !tab.url.startsWith('http')) { showToast('No valid URL on current tab'); return; }
     document.getElementById('urlInput').value = tab.url;
     document.getElementById('urlInput').focus();
     document.getElementById('errorText').classList.remove('show');
   });
 
-  const addBtn = document.getElementById('addBtn');
-  const urlInput = document.getElementById('urlInput');
-  const errorText = document.getElementById('errorText');
+  document.getElementById('addBtn').addEventListener('click', handleAdd);
+  document.getElementById('urlInput').addEventListener('keydown', e => { if (e.key === 'Enter') handleAdd(); });
+  document.getElementById('urlInput').addEventListener('input', () => document.getElementById('errorText').classList.remove('show'));
 
-  addBtn.addEventListener('click', handleAdd);
-  urlInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter') handleAdd();
-  });
-  urlInput.addEventListener('input', () => {
-    errorText.classList.remove('show');
-  });
-
-  // Export
   document.getElementById('exportBtn').addEventListener('click', async () => {
-    const resp = await sendMsg({ type: 'EXPORT' });
-    const blob = new Blob([resp.json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `url-tracker-export-${new Date().toISOString().slice(0,10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast('Exported!');
+    const { json } = await sendMsg({ type: 'EXPORT' });
+    const a = Object.assign(document.createElement('a'), {
+      href: URL.createObjectURL(new Blob([json], { type: 'application/json' })),
+      download: `url-tracker-${new Date().toISOString().slice(0,10)}.json`
+    });
+    a.click(); showToast('Exported!');
   });
 
-  // Import
-  document.getElementById('importBtn').addEventListener('click', () => {
-    document.getElementById('importFile').click();
-  });
-
-  document.getElementById('importFile').addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const text = await file.text();
+  document.getElementById('importBtn').addEventListener('click', () => document.getElementById('importFile').click());
+  document.getElementById('importFile').addEventListener('change', async e => {
+    const file = e.target.files[0]; if (!file) return;
     try {
-      await sendMsg({ type: 'IMPORT', json: text });
-      showToast('Imported!');
-      await loadState();
-    } catch {
-      showToast('Import failed — invalid JSON');
-    }
+      await sendMsg({ type: 'IMPORT', json: await file.text() });
+      await loadOrder(); showToast('Imported!'); await loadState();
+    } catch { showToast('Import failed'); }
     e.target.value = '';
   });
 }
 
 async function handleAdd() {
-  const urlInput = document.getElementById('urlInput');
-  const errorText = document.getElementById('errorText');
-  const raw = urlInput.value.trim();
+  const input  = document.getElementById('urlInput');
+  const errTxt = document.getElementById('errorText');
+  const raw    = input.value.trim();
+  if (!raw || !raw.startsWith('http')) { errTxt.classList.add('show'); return; }
 
-  if (!raw || (!raw.startsWith('http://') && !raw.startsWith('https://'))) {
-    errorText.classList.add('show');
-    return;
-  }
-
-  const limitHrs = parseFloat(document.getElementById('limitHours').value) || 0;
-  const limitMins = parseFloat(document.getElementById('limitMins').value) || 0;
-  const notifyHrs = parseFloat(document.getElementById('notifyHours').value) || 2;
-  const autoClose = document.getElementById('autoCloseCheck').checked;
-
-  const limitSeconds = limitHrs > 0 || limitMins > 0
-    ? Math.round((limitHrs * 3600) + (limitMins * 60))
-    : null;
-  const notifyBeforeSeconds = Math.round(notifyHrs * 3600);
+  const lh = parseFloat(document.getElementById('limitHours').value)  || 0;
+  const lm = parseFloat(document.getElementById('limitMins').value)   || 0;
+  const nh = parseFloat(document.getElementById('notifyHours').value) || 2;
+  const ac = document.getElementById('autoCloseCheck').checked;
 
   const resp = await sendMsg({
-    type: 'ADD_URL',
-    originalUrl: raw,
-    limitSeconds,
-    notifyBeforeSeconds,
-    autoClose
+    type: 'ADD_URL', originalUrl: raw,
+    limitSeconds:        (lh>0||lm>0) ? Math.round(lh*3600+lm*60) : null,
+    notifyBeforeSeconds: Math.round(nh*3600), autoClose: ac
   });
+  if (resp.error) { errTxt.textContent = resp.error; errTxt.classList.add('show'); return; }
 
-  if (resp.error) {
-    errorText.textContent = resp.error;
-    errorText.classList.add('show');
-    return;
-  }
-
-  // Reset form
-  urlInput.value = '';
-  document.getElementById('limitHours').value = '';
-  document.getElementById('limitMins').value = '';
+  input.value = '';
+  ['limitHours','limitMins'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('notifyHours').value = '2';
   document.getElementById('autoCloseCheck').checked = false;
-  errorText.classList.remove('show');
+  errTxt.classList.remove('show');
 
+  if (resp.normalizedUrl && !urlOrder.includes(resp.normalizedUrl)) {
+    urlOrder.push(resp.normalizedUrl); await saveOrder();
+  }
   showToast('URL added!');
   await loadState();
+  document.getElementById('tabTracker').click();
 }
 
-// ─── Toast ─────────────────────────────────────────────────────────────────────
+// ─── Storage info ────────────────────────────────────────────────────────────────
 
-function showToast(msg, duration = 2000) {
-  const toast = document.getElementById('toast');
-  toast.textContent = msg;
-  toast.classList.add('show');
-  setTimeout(() => toast.classList.remove('show'), duration);
+function showExtId() {
+  const id = chrome.runtime.id;
+  document.getElementById('extId').textContent = id;
+  document.querySelectorAll('.ext-id-dyn').forEach(el => el.textContent = id);
 }
 
-// ─── Message Helper ────────────────────────────────────────────────────────────
+async function showStorageUsed() {
+  chrome.storage.local.getBytesInUse(null, bytes => {
+    const el = document.getElementById('storageUsed');
+    if (el) el.textContent = (bytes/1024).toFixed(2) + ' KB of ~5 MB (local)';
+  });
+}
+
+// ─── Toast / sendMsg ─────────────────────────────────────────────────────────────
+
+function showToast(msg, ms=2000) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), ms);
+}
 
 function sendMsg(msg) {
   return new Promise((resolve, reject) => {

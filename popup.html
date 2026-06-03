@@ -2,76 +2,115 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Exact URL Tracker</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
 
-  <!-- Header -->
   <div class="header">
-    <span class="header-title">Exact URL Tracker</span>
+    <span class="header-title">⏱ URL Tracker</span>
     <span class="header-sub" id="activeCount">0 active</span>
   </div>
 
-  <!-- Add URL Section -->
-  <div class="add-section">
-    <div class="add-row">
-      <input
-        class="input-url"
-        id="urlInput"
-        type="text"
-        placeholder="https://github.com/codespaces/your-session-url"
-        spellcheck="false"
-        autocomplete="off"
-      />
-      <button class="btn-current" id="currentTabBtn" title="Use current active tab URL">⊕ Current</button>
-      <button class="btn-add" id="addBtn">+ Add</button>
-    </div>
-    <div class="limit-row add-row">
-      <span class="label-small">Monthly limit:</span>
-      <input class="input-small" id="limitHours" type="number" min="0" step="0.5" placeholder="hrs" title="Hours">
-      <input class="input-small" id="limitMins" type="number" min="0" max="59" step="1" placeholder="min" title="Minutes (optional)">
-      <span class="label-small">Notify before:</span>
-      <input class="input-small" id="notifyHours" type="number" min="0" step="0.5" placeholder="2" value="2" title="Notify X hours before limit">
-      <span class="label-small">hrs</span>
-    </div>
-    <div class="toggle-row add-row">
-      <label class="check-wrap">
-        <input type="checkbox" id="autoCloseCheck">
-        <span class="check-label">Auto-close tab on limit</span>
-      </label>
-    </div>
-    <div class="error-text" id="errorText">Please enter a valid URL (must start with http:// or https://)</div>
+  <div class="tabs">
+    <button class="tab active" id="tabTracker" data-tab="tracker">📋 Tracker</button>
+    <button class="tab" id="tabManage" data-tab="manage">⚙ Manage</button>
   </div>
 
-  <!-- Tracked Sites Label -->
-  <div class="section-label" id="sectionLabel">TRACKED SITES</div>
-
-  <!-- URL Cards List -->
-  <div class="url-list" id="urlList">
-    <div class="empty-state" id="emptyState">
-      <div class="empty-icon">⏱</div>
-      <div class="empty-text">No URLs tracked yet.<br>Add exact session URLs above.</div>
+  <!-- TAB 1: TRACKER -->
+  <div class="tab-panel" id="panelTracker">
+    <div class="section-label" id="sectionLabel">
+      TRACKED SITES <span class="drag-hint">⠿ drag handle to reorder</span>
+    </div>
+    <div class="url-list" id="urlList">
+      <div class="empty-state" id="emptyState">
+        <div class="empty-icon">⏱</div>
+        <div class="empty-text">No URLs tracked yet.<br>Go to Manage tab to add URLs.</div>
+      </div>
+    </div>
+    <div class="summary-bar" id="summaryBar" style="display:none">
+      <span class="summary-label">Total this month</span>
+      <span class="summary-val" id="totalMonth">0s</span>
     </div>
   </div>
 
-  <!-- Summary Bar -->
-  <div class="summary-bar" id="summaryBar" style="display:none">
-    <span class="summary-label">Total tracked this month</span>
-    <span class="summary-val" id="totalMonth">0m</span>
+  <!-- TAB 2: MANAGE -->
+  <div class="tab-panel hidden" id="panelManage">
+    <div class="add-section">
+      <div class="add-section-title">Add New URL</div>
+      <div class="add-row">
+        <input class="input-url" id="urlInput" type="text"
+          placeholder="https://github.com/codespaces/your-session-url"
+          spellcheck="false" autocomplete="off"/>
+        <button class="btn-current" id="currentTabBtn">⊕ Current</button>
+        <button class="btn-add" id="addBtn">+ Add</button>
+      </div>
+      <div class="limit-row add-row">
+        <span class="label-small">Limit:</span>
+        <input class="input-small" id="limitHours" type="number" min="0" step="0.5" placeholder="hrs">
+        <input class="input-small" id="limitMins"  type="number" min="0" max="59"   placeholder="min">
+        <span class="label-small">Notify before:</span>
+        <input class="input-small" id="notifyHours" type="number" min="0" step="0.5" value="2">
+        <span class="label-small">hrs</span>
+      </div>
+      <div class="toggle-row add-row">
+        <label class="check-wrap">
+          <input type="checkbox" id="autoCloseCheck">
+          <span class="check-label">Auto-close tab on limit</span>
+        </label>
+      </div>
+      <div class="error-text" id="errorText">Please enter a valid URL (http:// or https://)</div>
+    </div>
+
+    <div class="manage-block">
+      <div class="add-section-title">Where is data stored?</div>
+      <div class="storage-info">
+        <div class="storage-row">
+          <span class="storage-icon">💾</span>
+          <div>
+            <div class="storage-label">Engine</div>
+            <div class="storage-val">chrome.storage.local (LevelDB, private per-extension)</div>
+          </div>
+        </div>
+        <div class="storage-row">
+          <span class="storage-icon">🐧</span>
+          <div>
+            <div class="storage-label">Linux path</div>
+            <div class="storage-val mono-small">~/.config/google-chrome/Default/<br>Local Extension Settings/<span id="extId" class="ext-id-dyn">…</span>/</div>
+          </div>
+        </div>
+        <div class="storage-row">
+          <span class="storage-icon">🪟</span>
+          <div>
+            <div class="storage-label">Windows path</div>
+            <div class="storage-val mono-small">%LOCALAPPDATA%\Google\Chrome\User Data\Default\<br>Local Extension Settings\<span class="ext-id-dyn">…</span>\</div>
+          </div>
+        </div>
+        <div class="storage-row">
+          <span class="storage-icon">🍎</span>
+          <div>
+            <div class="storage-label">Mac path</div>
+            <div class="storage-val mono-small">~/Library/Application Support/Google/Chrome/<br>Default/Local Extension Settings/<span class="ext-id-dyn">…</span>/</div>
+          </div>
+        </div>
+        <div class="storage-row">
+          <span class="storage-icon">📊</span>
+          <div>
+            <div class="storage-label">Usage</div>
+            <div class="storage-val" id="storageUsed">calculating…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="action-bar">
+      <button class="btn-action" id="exportBtn">↑ Export JSON</button>
+      <button class="btn-action" id="importBtn">↓ Import JSON</button>
+      <input type="file" id="importFile" accept=".json" style="display:none">
+    </div>
   </div>
 
-  <!-- Action Bar -->
-  <div class="action-bar">
-    <button class="btn-action" id="exportBtn">↑ Export JSON</button>
-    <button class="btn-action" id="importBtn">↓ Import JSON</button>
-    <input type="file" id="importFile" accept=".json" style="display:none">
-  </div>
-
-  <!-- Toast -->
   <div class="toast" id="toast"></div>
-
   <script src="utils.js"></script>
   <script src="popup.js"></script>
 </body>
